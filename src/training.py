@@ -1,20 +1,19 @@
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
-import copy
+import flax
 import jax
 import jax.numpy as jnp
 import pydantic
-import flax
+import wandb
 from flax import jax_utils, struct
 from flax.serialization import from_bytes, to_bytes
 from flax.training import train_state
 from flax.training.common_utils import shard
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-
-import wandb
 
 PathType = Union[Path, str]
 OPTIMIZER_STATE_PATH = "optim_state.msgpack"
@@ -118,7 +117,11 @@ class Trainer:
         for epoch in range(self.config.max_epochs):
             tr_loss, avg_tr_loss = jnp.array(0), jnp.array(0)
 
-            pbar = tqdm(enumerate(train_data), desc=f"Running epoch-{epoch}", total=len(train_data))
+            pbar = tqdm(
+                enumerate(train_data),
+                desc=f"Running epoch-{epoch}",
+                total=len(train_data),
+            )
             for step, batch in pbar:
                 batch = shard(batch)
 

@@ -1,8 +1,8 @@
+import copy
 import math
 from functools import partial
 from typing import Any, Callable, Dict, List, Tuple
 
-import copy
 import flax
 import jax
 import jax.numpy as jnp
@@ -11,16 +11,15 @@ from datasets import load_dataset
 from flax.training import train_state
 from transformers import AutoTokenizer
 
-from .data2vec_text import ema_step
-
 from .constants import HF_TOKEN, IGNORE_INDEX
-from .training import (BaseConfig, Trainer, TrainerConfig,
-                                 TrainingStepOutput, ValidationStepOutput)
-from .utils import (create_tx, hf_save_fn,
-                              linear_scheduler_with_warmup, read_yaml)
-
+from .data2vec_text import ema_step
+from .training import (BaseConfig, Trainer, TrainerConfig, TrainingStepOutput,
+                       ValidationStepOutput)
+from .utils import (create_tx, hf_save_fn, linear_scheduler_with_warmup,
+                    read_yaml)
 
 MASKED_INDEX = 0
+
 
 def smooth_l1_loss(x, y, beta=4):
     x, y = x.astype(jnp.float32), y.astype(jnp.float32)
@@ -182,7 +181,9 @@ class TrainState(train_state.TrainState):
     def ema_step(self, teacher_params, student_params):
         # TODO: try to understand how jit will handle floats & ints under the hood
         decay = self.get_decay()
-        return ema_step(teacher_params, student_params, decay=decay, teacher_dtype=jnp.float32)
+        return ema_step(
+            teacher_params, student_params, decay=decay, teacher_dtype=jnp.float32
+        )
 
     def get_decay(self):
         r = self.ema_end_decay - self.ema_start_decay
