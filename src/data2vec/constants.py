@@ -9,4 +9,4 @@ IGNORE_INDEX = -100
 OPTIMIZER_STATE_PATH = "optim_state.msgpack"
 MODEL_PATH = "flax_model.msgpack"
 TRAINING_STATE_PATH = "training_state.yaml"
-CONFIG_PATH = "configs.yaml"
+CONFIG_PATH = "config.json"

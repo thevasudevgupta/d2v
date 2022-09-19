@@ -1,12 +1,14 @@
+import json
+from pathlib import Path
+
+import jax
+import jax.numpy as jnp
 import optax
 import yaml
 from flax import traverse_util
-import jax
-import jax.numpy as jnp
+from flax.serialization import from_bytes, to_bytes
 
-from pathlib import Path
-from flax.serialization import to_bytes, from_bytes
-from .constants import IGNORE_INDEX, MODEL_PATH, CONFIG_PATH
+from .constants import CONFIG_PATH, IGNORE_INDEX, MODEL_PATH
 
 
 def read_yaml(path):
@@ -42,8 +44,8 @@ def custom_save_fn(
     with open(save_dir / MODEL_PATH, "wb") as f:
         f.write(to_bytes(params))
 
-    with open(save_dir / CONFIG_PATH, "w") as f:
-        yaml.dump(config_dict, f)
+    with open(save_dir / CONFIG_PATH, "w", encoding="utf-8") as f:
+        f.write(json.dumps(config_dict, indent=2, sort_keys=True) + "\n")
 
     tokenizer_save_fn(save_dir)
 
@@ -57,7 +59,6 @@ def hf_save_fn(
 ):
     model_save_fn(save_dir, params=params, push_to_hub=push_to_hub)
     tokenizer_save_fn(save_dir, push_to_hub=push_to_hub)
-
 
 
 def linear_scheduler_with_warmup(lr, init_lr, warmup_steps, num_train_steps):

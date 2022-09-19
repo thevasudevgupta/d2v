@@ -7,22 +7,25 @@ import flax
 import jax
 import jax.numpy as jnp
 import pydantic
-import wandb
 from flax import jax_utils, struct
 from flax.serialization import from_bytes, to_bytes
 from flax.training import train_state
 from flax.training.common_utils import shard
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from .constants import OPTIMIZER_STATE_PATH, MODEL_PATH, TRAINING_STATE_PATH, CONFIG_PATH
+
+import wandb
+
+from .constants import (CONFIG_PATH, MODEL_PATH, OPTIMIZER_STATE_PATH,
+                        TRAINING_STATE_PATH)
 
 PathType = Union[Path, str]
+
 
 @struct.dataclass
 class TrainingStepOutput:
     state: train_state.TrainState
     dropout_rng: jnp.DeviceArray
-    teacher_params: flax.core.FrozenDict
 
     # following are used only for logging purposes
     loss: jnp.DeviceArray

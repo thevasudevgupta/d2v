@@ -11,16 +11,13 @@ from datasets import load_dataset
 from flax.training import train_state
 from transformers import AutoTokenizer
 
-from data2vec.data2vec_text import Data2VecTextModel, Data2VecTextModelConfig
-
 from data2vec.constants import HF_TOKEN, IGNORE_INDEX
-from data2vec.data2vec_text import ema_step
-from data2vec.training import (BaseConfig, Trainer, TrainerConfig, TrainingStepOutput,
-                       ValidationStepOutput)
-from data2vec.utils import (create_tx, custom_save_fn, linear_scheduler_with_warmup,
-                    read_yaml)
-
-MASKED_INDEX = 0
+from data2vec.data2vec_text import (Data2VecTextModel, Data2VecTextModelConfig,
+                                    ema_step)
+from data2vec.training import (BaseConfig, Trainer, TrainerConfig,
+                               TrainingStepOutput, ValidationStepOutput)
+from data2vec.utils import (create_tx, custom_save_fn,
+                            linear_scheduler_with_warmup, read_yaml)
 
 
 def smooth_l1_loss(x, y, beta=4):
@@ -61,20 +58,33 @@ def training_step(
             method=state.teacher_fn,
         )
 
-        masked_indices = input_ids == MASKED_INDEX
-        x = x.at[masked_indices].get()
-        y = y.at(masked_indices).get()
+        masked_indices = input_ids == state.mask_token_id
+
+        # TODO: following raises the error:
+        # https://github.com/google/jax/issues/2765
+        # x = x.at[masked_indices].get()
+        # y = y.at(masked_indices).get()
+
+        # TODO: it's definitely expensive to calculdate loss over all the items
+        # and then eliminate all positions other than masked indices
+        # but do we have a choice here?
+        loss = state.loss_fn(x, y)
+
+        loss = jnp.where(masked_indices, loss, 0).sum()
 
         # taking mean is fine as long as batches are equally distributed
         # TODO: check if data2vec authors are doing mean/sum
-        return state.loss_fn(x, y).mean()
+        return loss / jnp.sum(masked_indices)
 
     grad_fn = jax.value_and_grad(loss_fn)
     loss, grads = grad_fn(state.params)
 
     grads = jax.lax.pmean(grads, axis_name="batch")
 
-    teacher_params = state.ema_step(teacher_params, state.params)
+    # TODO: why do we need to call following freeze explicitly??
+    teacher_params = state.ema_step(
+        flax.core.freeze(state.teacher_params), flax.core.freeze(state.params)
+    )
     new_state = state.apply_gradients(grads=grads, teacher_params=teacher_params)
 
     return TrainingStepOutput(
@@ -110,11 +120,11 @@ def validation_step(
         method=state.teacher_fn,
     )
 
-    masked_indices = input_ids == MASKED_INDEX
-    x = x.at[masked_indices].get()
-    y = y.at(masked_indices).get()
+    masked_indices = input_ids == state.mask_token_id
+    loss = state.loss_fn(x, y)
 
-    loss = state.loss_fn(x, y).mean()
+    loss = jnp.where(masked_indices, loss, 0).sum()
+    loss = loss / jnp.sum(masked_indices)
 
     return ValidationStepOutput(loss=loss)
 
@@ -141,7 +151,9 @@ class DataCollatorForMLM:
         )
 
         special_tokens_mask = inputs.pop("special_tokens_mask")
-        input_ids, labels = self.mask_tokens(inputs.pop("input_ids"), special_tokens_mask)
+        input_ids, labels = self.mask_tokens(
+            inputs.pop("input_ids"), special_tokens_mask
+        )
 
         return {
             "input_ids": input_ids,
@@ -192,6 +204,9 @@ class TrainState(train_state.TrainState):
     ema_start_decay: float
     ema_end_decay: float
     total_steps: int
+
+    mask_token_id: int
+
     teacher_fn: Callable = flax.struct.field(pytree_node=False)
 
     loss_fn: Callable = flax.struct.field(pytree_node=False)
@@ -275,7 +290,9 @@ tx = create_tx(lr_scheduler, configs_dict["optax"]["weight_decay"])
 # as teacher model doesn't have trainable parameters
 state = TrainState.create(
     apply_fn=model.apply,
-    params=flax.core.unfreeze(variables["params"]),  # TODO: why we need to unfreeze here???
+    params=flax.core.unfreeze(
+        variables["params"]
+    ),  # TODO: why we need to unfreeze here???
     tx=tx,
     loss_fn=smooth_l1_loss,
     lr_scheduler=lr_scheduler,
@@ -285,6 +302,7 @@ state = TrainState.create(
     ema_end_decay=configs_dict["ema"]["ema_end_decay"],
     total_steps=num_steps,
     teacher_fn=model.extract_features,
+    mask_token_id=tokenizer.mask_token_id,
 )
 
 new_state = trainer.train(state, rngs, train_data, val_data, wandb_configs=configs_dict)

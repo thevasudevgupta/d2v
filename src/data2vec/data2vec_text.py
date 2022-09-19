@@ -30,14 +30,14 @@ class Data2VecTextModel(FlaxRobertaModule):
             nn.Dense(hidden_size * 2, dtype=self.dtype)
             for _ in range(self.config.num_head_layers - 1)
         ]
-        self.head_layers = head_layers + [
-            nn.Dense(hidden_size, dtype=self.dtype)
-        ]
+        self.head_layers = head_layers + [nn.Dense(hidden_size, dtype=self.dtype)]
 
     def __call__(self, input_ids, attention_mask, deterministic: bool = True):
-        hidden_states = super().__call__(
-            input_ids, attention_mask, deterministic=deterministic
-        ).last_hidden_state
+        hidden_states = (
+            super()
+            .__call__(input_ids, attention_mask, deterministic=deterministic)
+            .last_hidden_state
+        )
         for layer in self.head_layers:
             hidden_states = layer(hidden_states)
             hidden_states = nn.gelu(
@@ -46,9 +46,11 @@ class Data2VecTextModel(FlaxRobertaModule):
         return hidden_states
 
     def extract_features(self, input_ids, attention_mask, deterministic: bool = True):
-        hidden_states = super().__call__(
-            input_ids, attention_mask, deterministic=deterministic
-        ).last_hidden_state
+        hidden_states = (
+            super()
+            .__call__(input_ids, attention_mask, deterministic=deterministic)
+            .last_hidden_state
+        )
         return hidden_states
 
 
