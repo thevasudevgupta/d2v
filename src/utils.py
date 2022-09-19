@@ -7,6 +7,23 @@ def read_yaml(path):
     return yaml.safe_load(open(path, "r"))
 
 
+def cross_entropy(logits, labels, ignore_index=IGNORE_INDEX):
+    """
+    Args:
+        logits: bsz, seqlen, vocab_size
+        labels: bsz, seqlen
+    """
+    loss_mask = labels != ignore_index
+
+    vocab_size = logits.shape[-1]
+    labels = (labels[..., None] == jnp.arange(vocab_size)[None]).astype("f4")
+    logits = jax.nn.log_softmax(logits, axis=-1)
+    loss = -jnp.sum(labels * logits, axis=-1)
+
+    loss = jnp.where(loss_mask, loss, 0).sum()
+    return loss / jnp.sum(loss_mask)
+
+
 def hf_save_fn(
     save_dir,
     params,

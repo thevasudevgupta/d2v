@@ -2,9 +2,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
+import copy
 import jax
 import jax.numpy as jnp
 import pydantic
+import flax
 from flax import jax_utils, struct
 from flax.serialization import from_bytes, to_bytes
 from flax.training import train_state
@@ -24,6 +26,7 @@ TRAINING_STATE_PATH = "training_state.yaml"
 class TrainingStepOutput:
     state: train_state.TrainState
     dropout_rng: jnp.DeviceArray
+    teacher_params: flax.core.FrozenDict
 
     # following are used only for logging purposes
     loss: jnp.DeviceArray
@@ -72,10 +75,10 @@ class Trainer:
     def train(
         self,
         state: train_state.TrainState,
+        rng: jax.random.PRNGKey,
         train_data,
         val_data,
         wandb_configs: Optional[Dict[str, Any]] = None,
-        seed: int = 0,
     ):
         wandb_configs = wandb_configs or self.config.to_dict()
         logger = wandb.init(
@@ -110,7 +113,6 @@ class Trainer:
         training_step = jax.pmap(self.training_step, **self.train_pmap_kwargs)
         validation_step = jax.pmap(self.validation_step, **self.val_pmap_kwargs)
 
-        rng = jax.random.PRNGKey(seed)
         dropout_rng = jax.random.split(rng, jax.device_count())
 
         for epoch in range(self.config.max_epochs):

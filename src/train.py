@@ -2,13 +2,16 @@ import math
 from functools import partial
 from typing import Any, Callable, Dict, List, Tuple
 
+import copy
 import flax
 import jax
 import jax.numpy as jnp
 import numpy as np
 from datasets import load_dataset
 from flax.training import train_state
-from transformers import AutoTokenizer, FlaxBigBirdForMaskedLM
+from transformers import AutoTokenizer
+
+from .data2vec_text import ema_step
 
 from .constants import HF_TOKEN, IGNORE_INDEX
 from .training import (BaseConfig, Trainer, TrainerConfig,
@@ -17,21 +20,15 @@ from .utils import (create_tx, hf_save_fn,
                               linear_scheduler_with_warmup, read_yaml)
 
 
-def cross_entropy(logits, labels, ignore_index=IGNORE_INDEX):
-    """
-    Args:
-        logits: bsz, seqlen, vocab_size
-        labels: bsz, seqlen
-    """
-    loss_mask = labels != ignore_index
+MASKED_INDEX = 0
 
-    vocab_size = logits.shape[-1]
-    labels = (labels[..., None] == jnp.arange(vocab_size)[None]).astype("f4")
-    logits = jax.nn.log_softmax(logits, axis=-1)
-    loss = -jnp.sum(labels * logits, axis=-1)
+def smooth_l1_loss(x, y, beta=4):
+    x, y = x.astype(jnp.float32), y.astype(jnp.float32)
+    l1_loss = jnp.sum(jnp.abs(y - x), axis=-1)
+    l2_loss = jnp.sum(jnp.square(y - x), axis=-1) / (2 * beta)
 
-    loss = jnp.where(loss_mask, loss, 0).sum()
-    return loss / jnp.sum(loss_mask)
+    loss = jnp.where(l1_loss < beta, l2_loss, l1_loss)
+    return loss
 
 
 def training_step(
@@ -42,24 +39,48 @@ def training_step(
     new_drp_rng, drp_rng = jax.random.split(dropout_rng, num=2)
 
     def loss_fn(params):
-        labels = batch.pop("labels")
+        target_ids = batch.pop("target_ids")
+        attention_mask = batch.pop("attention_mask")
+        input_ids = batch.pop("input_ids")
 
-        outputs = state.apply_fn(
-            **batch,
-            params=params,
-            dropout_rng=drp_rng,
-            train=True,
+        x = state.apply_fn(
+            {"params": params},
+            input_ids,
+            attention_mask,
+            deterministic=False,
+            rngs={"dropout": drp_rng},
         )
 
+        # TODO: oops, let's clear basics again
+        # y = state.extract_features(
+        #     target_ids,
+        #     attention_mask,
+        #     deterministic=True,
+        # )
+        y = state.apply_fn(
+            {"params": teacher_params},
+            target_ids,
+            attention_mask,
+            deterministic=True,
+            rngs=None,
+            method=state.teacher_fn,
+        )
+
+        masked_indices = input_ids == MASKED_INDEX
+        x = x.at[masked_indices].get()
+        y = y.at(masked_indices).get()
+
         # taking mean is fine as long as batches are equally distributed
-        return state.loss_fn(outputs.logits, labels)
+        # TODO: check if data2vec authors are doing mean/sum
+        return state.loss_fn(x, y).mean()
 
     grad_fn = jax.value_and_grad(loss_fn)
     loss, grads = grad_fn(state.params)
 
     grads = jax.lax.pmean(grads, axis_name="batch")
 
-    new_state = state.apply_gradients(grads=grads)
+    teacher_params = state.ema_step(teacher_params, state.params)
+    new_state = state.apply_gradients(grads=grads, teacher_params=teacher_params)
 
     return TrainingStepOutput(
         state=new_state,
@@ -69,17 +90,17 @@ def training_step(
     )
 
 
-def validation_step(
-    state: train_state.TrainState, batch: Dict[str, jnp.DeviceArray]
-) -> ValidationStepOutput:
+# def validation_step(
+#     state: train_state.TrainState, batch: Dict[str, jnp.DeviceArray]
+# ) -> ValidationStepOutput:
 
-    labels = batch.pop("labels")
-    outputs = state.apply_fn(**batch, params=state.params, train=False)
+#     labels = batch.pop("labels")
+#     outputs = state.apply_fn(**batch, params=state.params, train=False)
 
-    loss = state.loss_fn(outputs.logits, labels)
-    loss = jax.lax.pmean(loss, axis_name="batch")
+#     loss = state.loss_fn(outputs.logits, labels)
+#     loss = jax.lax.pmean(loss, axis_name="batch")
 
-    return ValidationStepOutput(loss=loss)
+#     return ValidationStepOutput(loss=loss)
 
 
 class DataCollatorForMLMConfig(BaseConfig):
@@ -148,20 +169,47 @@ class DataCollatorForMLM:
 
 
 class TrainState(train_state.TrainState):
+    # data2vec specific extra state
+    teacher_params: flax.core.FrozenDict[str, Any]
+    ema_start_decay: float
+    ema_end_decay: float
+    total_steps: int
+    teacher_fn: Callable = flax.struct.field(pytree_node=False)
+
     loss_fn: Callable = flax.struct.field(pytree_node=False)
     lr_scheduler: Callable = flax.struct.field(pytree_node=False)
+
+    def ema_step(self, teacher_params, student_params):
+        # TODO: try to understand how jit will handle floats & ints under the hood
+        decay = self.get_decay()
+        return ema_step(teacher_params, student_params, decay=decay, teacher_dtype=jnp.float32)
+
+    def get_decay(self):
+        r = self.ema_end_decay - self.ema_start_decay
+        pct_remaining = 1 - self.step / self.total_steps
+        return self.ema_end_decay - r * pct_remaining
 
 
 configs_dict = read_yaml("config.yaml")
 print(configs_dict)
 print(jax.devices())
 
+from .training import Data2VecTextModel, Data2VecTextModelConfig
+
 model_config = configs_dict["model"]
-model_id = model_config.pop("model_id")
-model = FlaxBigBirdForMaskedLM.from_pretrained(
-    model_id, **model_config, use_auth_token=HF_TOKEN
-)
-tokenizer = AutoTokenizer.from_pretrained(model_id, use_auth_token=HF_TOKEN)
+dtype = model_config.pop("dtype")
+tokenizer_id = model_config.pop("tokenizer_id")
+model_config = Data2VecTextModelConfig(**model_config)
+model = Data2VecTextModel(model_config, dtype=dtype)
+
+seed = 0
+
+rngs = jax.random.PRNGKey(seed)
+model_rngs, rngs = jax.random.split(rngs, num=2)
+input_ids, attn_mask = jnp.ones((2, 3), dtype="i4"), jnp.ones((2, 3), dtype="i4")
+variables = model.init(model_rngs, input_ids, attn_mask)
+
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
 print(model.config)
 
 datacollator_config = DataCollatorForMLMConfig.from_dict(configs_dict["data_collator"])
@@ -201,12 +249,20 @@ lr_scheduler = linear_scheduler_with_warmup(
 )
 tx = create_tx(lr_scheduler, configs_dict["optax"]["weight_decay"])
 
+# we don't need to maintain separate state of teacher model
+# as teacher model doesn't have trainable parameters
 state = TrainState.create(
-    apply_fn=model.__call__,
-    params=model.params,
+    apply_fn=model.apply,
+    params=variables["params"],
     tx=tx,
-    loss_fn=cross_entropy,
+    loss_fn=smooth_l1_loss,
     lr_scheduler=lr_scheduler,
+    # data2vec specifc arguments
+    teacher_params=copy.deepcopy(variables["params"]),
+    ema_start_decay=configs_dict["train_state"]["ema_start_decay"],
+    ema_end_decay=configs_dict["train_state"]["ema_end_decay"],
+    total_steps=num_steps,
+    teacher_fn=model.extract_features,
 )
 
-new_state = trainer.train(state, train_data, val_data, wandb_configs=configs_dict)
+new_state = trainer.train(state, rngs, train_data, val_data, wandb_configs=configs_dict)
