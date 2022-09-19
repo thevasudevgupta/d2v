@@ -234,7 +234,8 @@ trainer = Trainer(
     model_save_fn=save_fn,
 )
 
-dataset = load_dataset("wiki")
+# TODO: modify before starting main pretraining
+dataset = load_dataset("wikipedia", "20220301.en")
 train_data, val_data = dataset["train"], dataset["validation"]
 print(train_data, val_data)
 
