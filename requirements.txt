@@ -1,0 +1,11 @@
+# jax
+flax
+optax
+transformers
+datasets
+wandb
+PyYAML
+pydantic
+tqdm
+python-dotenv
+torch # dataloader dependency

@@ -1,0 +1,20 @@
+model:
+  model_id: ???
+
+data_collator:
+  max_length: 512
+  mlm_probability: 0.2
+
+trainer:
+  max_epochs: 10
+  batch_size_per_device: 2
+  wandb_project_name: ???
+  epochs_save_dir: ???
+  logging_steps: 128
+  max_steps_per_epoch: -1
+
+optax:
+  lr: 5.e-5
+  init_lr: 1.e-7
+  warmup_steps: 1500
+  weight_decay: 1.e-3
