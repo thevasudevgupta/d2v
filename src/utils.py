@@ -1,6 +1,12 @@
 import optax
 import yaml
 from flax import traverse_util
+import jax
+import jax.numpy as jnp
+
+from pathlib import Path
+from flax.serialization import to_bytes, from_bytes
+from .constants import IGNORE_INDEX, MODEL_PATH, CONFIG_PATH
 
 
 def read_yaml(path):
@@ -24,6 +30,24 @@ def cross_entropy(logits, labels, ignore_index=IGNORE_INDEX):
     return loss / jnp.sum(loss_mask)
 
 
+def custom_save_fn(
+    save_dir,
+    params,
+    config_dict,
+    tokenizer_save_fn,
+):
+    save_dir = Path(save_dir)
+    save_dir.mkdir(exist_ok=True)
+
+    with open(save_dir / MODEL_PATH, "wb") as f:
+        f.write(to_bytes(params))
+
+    with open(save_dir / CONFIG_PATH, "w") as f:
+        yaml.dump(config_dict, f)
+
+    tokenizer_save_fn(save_dir)
+
+
 def hf_save_fn(
     save_dir,
     params,
@@ -33,6 +57,7 @@ def hf_save_fn(
 ):
     model_save_fn(save_dir, params=params, push_to_hub=push_to_hub)
     tokenizer_save_fn(save_dir, push_to_hub=push_to_hub)
+
 
 
 def linear_scheduler_with_warmup(lr, init_lr, warmup_steps, num_train_steps):

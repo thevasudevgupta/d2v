@@ -1,5 +1,14 @@
 model:
-  model_id: ???
+  vocab_size: null  # will be set inside script
+  num_attention_heads: 12
+  num_hidden_layers: 6
+  hidden_size: 512
+  intermediate_size: 2048
+
+  # model related extra args
+  is_fp16: false
+  tokenizer_id: roberta-base
+
 
 data_collator:
   max_length: 512
@@ -7,9 +16,9 @@ data_collator:
 
 trainer:
   max_epochs: 10
-  batch_size_per_device: 2
-  wandb_project_name: ???
-  epochs_save_dir: ???
+  batch_size_per_device: 1
+  wandb_project_name: data2vec-text
+  epochs_save_dir: model_1
   logging_steps: 128
   max_steps_per_epoch: -1
 

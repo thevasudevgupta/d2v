@@ -15,7 +15,7 @@ from .constants import HF_TOKEN, IGNORE_INDEX
 from .data2vec_text import ema_step
 from .training import (BaseConfig, Trainer, TrainerConfig, TrainingStepOutput,
                        ValidationStepOutput)
-from .utils import (create_tx, hf_save_fn, linear_scheduler_with_warmup,
+from .utils import (create_tx, custom_save_fn, linear_scheduler_with_warmup,
                     read_yaml)
 
 MASKED_INDEX = 0
@@ -50,14 +50,8 @@ def training_step(
             rngs={"dropout": drp_rng},
         )
 
-        # TODO: oops, let's clear basics again
-        # y = state.extract_features(
-        #     target_ids,
-        #     attention_mask,
-        #     deterministic=True,
-        # )
         y = state.apply_fn(
-            {"params": teacher_params},
+            {"params": state.teacher_params},
             target_ids,
             attention_mask,
             deterministic=True,
@@ -89,17 +83,38 @@ def training_step(
     )
 
 
-# def validation_step(
-#     state: train_state.TrainState, batch: Dict[str, jnp.DeviceArray]
-# ) -> ValidationStepOutput:
+def validation_step(
+    state: train_state.TrainState, batch: Dict[str, jnp.DeviceArray]
+) -> ValidationStepOutput:
 
-#     labels = batch.pop("labels")
-#     outputs = state.apply_fn(**batch, params=state.params, train=False)
+    target_ids = batch.pop("target_ids")
+    attention_mask = batch.pop("attention_mask")
+    input_ids = batch.pop("input_ids")
 
-#     loss = state.loss_fn(outputs.logits, labels)
-#     loss = jax.lax.pmean(loss, axis_name="batch")
+    x = state.apply_fn(
+        {"params": state.params},
+        input_ids,
+        attention_mask,
+        deterministic=True,
+        rngs=None,
+    )
 
-#     return ValidationStepOutput(loss=loss)
+    y = state.apply_fn(
+        {"params": state.teacher_params},
+        target_ids,
+        attention_mask,
+        deterministic=True,
+        rngs=None,
+        method=state.teacher_fn,
+    )
+
+    masked_indices = input_ids == MASKED_INDEX
+    x = x.at[masked_indices].get()
+    y = y.at(masked_indices).get()
+
+    loss = state.loss_fn(x, y).mean()
+
+    return ValidationStepOutput(loss=loss)
 
 
 class DataCollatorForMLMConfig(BaseConfig):
@@ -126,9 +141,13 @@ class DataCollatorForMLM:
         )
 
         special_tokens_mask = inputs.pop("special_tokens_mask")
-        input_ids, labels = self.mask_tokens(inputs["input_ids"], special_tokens_mask)
+        input_ids, labels = self.mask_tokens(inputs.pop("input_ids"), special_tokens_mask)
 
-        return {**inputs, "input_ids": input_ids, "labels": labels}
+        return {
+            "input_ids": input_ids,
+            "target_ids": labels,
+            "attention_mask": inputs.pop("attention_mask"),
+        }
 
     def mask_tokens(
         self, input_ids: np.ndarray, special_tokens_mask: np.ndarray
@@ -192,35 +211,37 @@ class TrainState(train_state.TrainState):
 
 
 configs_dict = read_yaml("config.yaml")
+rngs = jax.random.PRNGKey(0)
 print(configs_dict)
 print(jax.devices())
 
 from .training import Data2VecTextModel, Data2VecTextModelConfig
 
 model_config = configs_dict["model"]
-dtype = model_config.pop("dtype")
+dtype = jnp.float16 if model_config.pop("is_fp16") else jnp.float32
 tokenizer_id = model_config.pop("tokenizer_id")
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+
+if model_config.pop("vocab_size") is None:
+    model_config["vocab_size"] = tokenizer.vocab_size
+
 model_config = Data2VecTextModelConfig(**model_config)
 model = Data2VecTextModel(model_config, dtype=dtype)
 
-seed = 0
-
-rngs = jax.random.PRNGKey(seed)
+# initializing the model weights
 model_rngs, rngs = jax.random.split(rngs, num=2)
 input_ids, attn_mask = jnp.ones((2, 3), dtype="i4"), jnp.ones((2, 3), dtype="i4")
 variables = model.init(model_rngs, input_ids, attn_mask)
 
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
-print(model.config)
+print(model.tabulate())
 
 datacollator_config = DataCollatorForMLMConfig.from_dict(configs_dict["data_collator"])
 collate_fn = DataCollatorForMLM(datacollator_config, tokenizer)
 
 save_fn = partial(
-    hf_save_fn,
-    model_save_fn=model.save_pretrained,
+    custom_save_fn,
+    config_dict=model.config.to_dict(),
     tokenizer_save_fn=tokenizer.save_pretrained,
-    push_to_hub=False,
 )
 
 trainer_config = TrainerConfig.from_dict(configs_dict["trainer"])
@@ -235,7 +256,7 @@ trainer = Trainer(
 )
 
 # TODO: modify before starting main pretraining
-dataset = load_dataset("wikipedia", "20220301.en")
+dataset = load_dataset("wikipedia", "20220301.simple")
 train_data, val_data = dataset["train"], dataset["validation"]
 print(train_data, val_data)
 

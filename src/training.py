@@ -14,12 +14,9 @@ from flax.training import train_state
 from flax.training.common_utils import shard
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
+from .constants import OPTIMIZER_STATE_PATH, MODEL_PATH, TRAINING_STATE_PATH, CONFIG_PATH
 
 PathType = Union[Path, str]
-OPTIMIZER_STATE_PATH = "optim_state.msgpack"
-MODEL_PATH = "flax_model.msgpack"
-TRAINING_STATE_PATH = "training_state.yaml"
-
 
 @struct.dataclass
 class TrainingStepOutput:
