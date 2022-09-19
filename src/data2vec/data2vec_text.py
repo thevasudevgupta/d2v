@@ -11,7 +11,6 @@ from transformers.models.roberta.modeling_flax_roberta import FlaxRobertaModule
 # but why do you think cross entropy loss would be better than mse??
 
 
-@dataclass
 class Data2VecTextModelConfig(RobertaConfig):
     num_head_layers: int = 2
     approximate_gelu: bool = True
@@ -26,19 +25,19 @@ class Data2VecTextModel(FlaxRobertaModule):
     def setup(self):
         super().setup()
 
-        encoder_hidden_size = self.config.encoder.hidden_size
+        hidden_size = self.config.hidden_size
         head_layers = [
-            nn.Dense(encoder_hidden_size * 2, dtype=self.dtype)
+            nn.Dense(hidden_size * 2, dtype=self.dtype)
             for _ in range(self.config.num_head_layers - 1)
         ]
         self.head_layers = head_layers + [
-            nn.Dense(encoder_hidden_size, dtype=self.dtype)
+            nn.Dense(hidden_size, dtype=self.dtype)
         ]
 
     def __call__(self, input_ids, attention_mask, deterministic: bool = True):
-        hidden_states = self.extract_features(
+        hidden_states = super().__call__(
             input_ids, attention_mask, deterministic=deterministic
-        )
+        ).last_hidden_state
         for layer in self.head_layers:
             hidden_states = layer(hidden_states)
             hidden_states = nn.gelu(
@@ -49,7 +48,7 @@ class Data2VecTextModel(FlaxRobertaModule):
     def extract_features(self, input_ids, attention_mask, deterministic: bool = True):
         hidden_states = super().__call__(
             input_ids, attention_mask, deterministic=deterministic
-        )
+        ).last_hidden_state
         return hidden_states
 
 

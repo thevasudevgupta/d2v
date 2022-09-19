@@ -11,11 +11,13 @@ from datasets import load_dataset
 from flax.training import train_state
 from transformers import AutoTokenizer
 
-from .constants import HF_TOKEN, IGNORE_INDEX
-from .data2vec_text import ema_step
-from .training import (BaseConfig, Trainer, TrainerConfig, TrainingStepOutput,
+from data2vec.data2vec_text import Data2VecTextModel, Data2VecTextModelConfig
+
+from data2vec.constants import HF_TOKEN, IGNORE_INDEX
+from data2vec.data2vec_text import ema_step
+from data2vec.training import (BaseConfig, Trainer, TrainerConfig, TrainingStepOutput,
                        ValidationStepOutput)
-from .utils import (create_tx, custom_save_fn, linear_scheduler_with_warmup,
+from data2vec.utils import (create_tx, custom_save_fn, linear_scheduler_with_warmup,
                     read_yaml)
 
 MASKED_INDEX = 0
@@ -128,10 +130,8 @@ class DataCollatorForMLM:
         self.tokenizer = tokenizer
 
     def __call__(self, batch: List[Dict[str, Any]]):
-        abstracts = [sample["abstract"] for sample in batch]
-        articles = [sample["article"] for sample in batch]
+        articles = [sample["text"] for sample in batch]
         inputs = self.tokenizer(
-            abstracts,
             articles,
             max_length=self.config.max_length,
             truncation=True,
@@ -215,7 +215,6 @@ rngs = jax.random.PRNGKey(0)
 print(configs_dict)
 print(jax.devices())
 
-from .training import Data2VecTextModel, Data2VecTextModelConfig
 
 model_config = configs_dict["model"]
 dtype = jnp.float16 if model_config.pop("is_fp16") else jnp.float32
@@ -229,11 +228,11 @@ model_config = Data2VecTextModelConfig(**model_config)
 model = Data2VecTextModel(model_config, dtype=dtype)
 
 # initializing the model weights
-model_rngs, rngs = jax.random.split(rngs, num=2)
+init_rngs, rngs = jax.random.split(rngs, num=2)
 input_ids, attn_mask = jnp.ones((2, 3), dtype="i4"), jnp.ones((2, 3), dtype="i4")
-variables = model.init(model_rngs, input_ids, attn_mask)
+variables = model.init(init_rngs, input_ids, attn_mask)
 
-print(model.tabulate())
+# print(model.tabulate(init_rngs, input_ids, attn_mask))
 
 datacollator_config = DataCollatorForMLMConfig.from_dict(configs_dict["data_collator"])
 collate_fn = DataCollatorForMLM(datacollator_config, tokenizer)
@@ -256,8 +255,8 @@ trainer = Trainer(
 )
 
 # TODO: modify before starting main pretraining
-dataset = load_dataset("wikipedia", "20220301.simple")
-train_data, val_data = dataset["train"], dataset["validation"]
+dataset = load_dataset("wikipedia", "20220301.simple", split="train")
+train_data, val_data = dataset, dataset
 print(train_data, val_data)
 
 # we are dropping the last batch for now
@@ -276,16 +275,20 @@ tx = create_tx(lr_scheduler, configs_dict["optax"]["weight_decay"])
 # as teacher model doesn't have trainable parameters
 state = TrainState.create(
     apply_fn=model.apply,
-    params=variables["params"],
+    params=flax.core.unfreeze(variables["params"]),  # TODO: why we need to unfreeze here???
     tx=tx,
     loss_fn=smooth_l1_loss,
     lr_scheduler=lr_scheduler,
     # data2vec specifc arguments
-    teacher_params=copy.deepcopy(variables["params"]),
-    ema_start_decay=configs_dict["train_state"]["ema_start_decay"],
-    ema_end_decay=configs_dict["train_state"]["ema_end_decay"],
+    teacher_params=variables["params"],
+    ema_start_decay=configs_dict["ema"]["ema_start_decay"],
+    ema_end_decay=configs_dict["ema"]["ema_end_decay"],
     total_steps=num_steps,
     teacher_fn=model.extract_features,
 )
 
 new_state = trainer.train(state, rngs, train_data, val_data, wandb_configs=configs_dict)
+
+# implement average of topk layers
+# control more on decay using jax condition
+# checkout if masking is working properly

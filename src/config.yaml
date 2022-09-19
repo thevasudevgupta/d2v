@@ -1,14 +1,21 @@
 model:
   vocab_size: null  # will be set inside script
-  num_attention_heads: 12
+  num_attention_heads: 8
   num_hidden_layers: 6
   hidden_size: 512
   intermediate_size: 2048
+
+  # data2vec extra args
+  num_head_layers: 2
+  approximate_gelu: true
 
   # model related extra args
   is_fp16: false
   tokenizer_id: roberta-base
 
+ema:
+  ema_start_decay: 0.999
+  ema_end_decay: 0.9999
 
 data_collator:
   max_length: 512
