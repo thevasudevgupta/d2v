@@ -1,10 +1,10 @@
-from dataclasses import dataclass
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 from transformers.models.roberta.configuration_roberta import RobertaConfig
 from transformers.models.roberta.modeling_flax_roberta import FlaxRobertaModule
+from flax.traverse_util import flatten_dict, unflatten_dict
 
 # TODO: make sure initialization is happening correctly
 # TODO: instead of mse loss, we can still try cross entropy loss (or say dot product)??
@@ -96,4 +96,19 @@ def ema_step(
             1 - decay
         )
 
-    return jax.tree_map(_step_internal, teacher_params, student_params)
+    teacher_params = flatten_dict(teacher_params)
+    student_params = flatten_dict(student_params)
+
+    common_keys = set(student_params.keys()) & set(teacher_params.keys())
+    extra_keys = set(teacher_params.keys()) - set(student_params.keys())
+    teacher_extra_params = {k: v for k, v in teacher_params.items() if k in extra_keys}
+
+    teacher_params = {k: v for k, v in teacher_params.items() if k in common_keys}
+    student_params = {k: v for k, v in student_params.items() if k in common_keys}
+
+    teacher_params = jax.tree_map(_step_internal, teacher_params, student_params)
+
+    # TODO: is following efficient?
+    teacher_params = {**teacher_extra_params, **teacher_params}
+
+    return unflatten_dict(teacher_params)

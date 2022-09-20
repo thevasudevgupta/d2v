@@ -111,13 +111,13 @@ def validation_step(
         rngs=None,
     )
 
-    y = state.apply_fn(
+    y = state.apply_fn_teacher(
         {"params": state.teacher_params},
         target_ids,
         attention_mask,
         deterministic=True,
         rngs=None,
-        method=state.teacher_fn,
+        method=None,
     )
 
     masked_indices = input_ids == state.mask_token_id
