@@ -4,6 +4,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Tuple
 
 import flax
+from flax.traverse_util import flatten_dict, unflatten_dict
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -12,7 +13,7 @@ from flax.training import train_state
 from transformers import AutoTokenizer
 
 from data2vec.constants import HF_TOKEN, IGNORE_INDEX
-from data2vec.data2vec_text import (Data2VecTextModel, Data2VecTextModelConfig,
+from data2vec.data2vec_text import (Data2VecTextStudent, Data2VecTextStudentConfig, Data2VecTextTeacher, Data2VecTextTeacherConfig,
                                     ema_step)
 from data2vec.training import (BaseConfig, Trainer, TrainerConfig,
                                TrainingStepOutput, ValidationStepOutput)
@@ -49,13 +50,13 @@ def training_step(
             rngs={"dropout": drp_rng},
         )
 
-        y = state.apply_fn(
+        y = state.apply_fn_teacher(
             {"params": state.teacher_params},
             target_ids,
             attention_mask,
             deterministic=True,
             rngs=None,
-            method=state.teacher_fn,
+            method=None,
         )
 
         masked_indices = input_ids == state.mask_token_id
@@ -207,7 +208,7 @@ class TrainState(train_state.TrainState):
 
     mask_token_id: int
 
-    teacher_fn: Callable = flax.struct.field(pytree_node=False)
+    apply_fn_teacher: Callable = flax.struct.field(pytree_node=False)
 
     loss_fn: Callable = flax.struct.field(pytree_node=False)
     lr_scheduler: Callable = flax.struct.field(pytree_node=False)
@@ -240,37 +241,53 @@ class TrainState(train_state.TrainState):
         pct_remaining = 1 - self.step / self.total_steps
         return self.ema_end_decay - r * pct_remaining
 
-
 configs_dict = read_yaml("config.yaml")
 rngs = jax.random.PRNGKey(0)
 print(configs_dict)
 print(jax.devices())
 
+common_config = configs_dict["common"]
 
-model_config = configs_dict["model"]
-dtype = jnp.float16 if model_config.pop("is_fp16") else jnp.float32
-tokenizer_id = model_config.pop("tokenizer_id")
+dtype = jnp.float16 if common_config.pop("is_fp16") else jnp.float32
+tokenizer_id = common_config.pop("tokenizer_id")
+
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
 
-if model_config.pop("vocab_size") is None:
-    model_config["vocab_size"] = tokenizer.vocab_size
+if common_config.pop("vocab_size") is None:
+    common_config["vocab_size"] = tokenizer.vocab_size
 
-model_config = Data2VecTextModelConfig(**model_config)
-model = Data2VecTextModel(model_config, dtype=dtype)
+student_config = {**common_config, **configs_dict["student"]}
+teacher_config = {**common_config, **configs_dict["teacher"]}
+
+student = Data2VecTextStudent(Data2VecTextStudentConfig(**student_config), dtype=dtype)
+teacher = Data2VecTextTeacher(Data2VecTextTeacherConfig(**teacher_config), dtype=dtype)
 
 # initializing the model weights
 init_rngs, rngs = jax.random.split(rngs, num=2)
+
+student_rngs, teacher_rngs = jax.random.split(init_rngs)
 input_ids, attn_mask = jnp.ones((2, 3), dtype="i4"), jnp.ones((2, 3), dtype="i4")
-variables = model.init(init_rngs, input_ids, attn_mask)
+student_params = student.init(student_rngs, input_ids, attn_mask)["params"]
+
+# TODO: there is a possibility of efficient way here
+# teacher may have some extra layer compared to teacher 
+# and hence we would have to init teacher separately
+teacher_params = teacher.init(teacher_rngs, input_ids, attn_mask)["params"]
+# but we want to initialize same parameters for the layers which are common in teacher & student
+teacher_params = unflatten_dict({**flatten_dict(teacher_params), **flatten_dict(student_params)})
+
+# TODO: why we need to unfreeze here???
+student_params = flax.core.unfreeze(student_params)
 
 # print(model.tabulate(init_rngs, input_ids, attn_mask))
 
 datacollator_config = DataCollatorForMLMConfig.from_dict(configs_dict["data_collator"])
 collate_fn = DataCollatorForMLM(datacollator_config, tokenizer)
 
+# TODO: we need to save teacher model as well
 save_fn = partial(
     custom_save_fn,
-    config_dict=model.config.to_dict(),
+    config_dict=student.config.to_dict(),
     tokenizer_save_fn=tokenizer.save_pretrained,
 )
 
@@ -305,24 +322,21 @@ tx = create_tx(lr_scheduler, configs_dict["optax"]["weight_decay"])
 # we don't need to maintain separate state of teacher model
 # as teacher model doesn't have trainable parameters
 state = TrainState.create(
-    apply_fn=model.apply,
-    # TODO: why we need to unfreeze here???
-    params=flax.core.unfreeze(variables["params"]),
+    apply_fn=student.apply,
+    params=student_params,
     tx=tx,
     loss_fn=smooth_l1_loss,
     lr_scheduler=lr_scheduler,
     # data2vec specifc arguments
-    teacher_params=flax.core.unfreeze(variables["params"]),
+    teacher_params=teacher_params,
     ema_anneal_end_step=num_steps,
     ema_start_decay=configs_dict["ema"]["ema_start_decay"],
     ema_end_decay=configs_dict["ema"]["ema_end_decay"],
     total_steps=num_steps,
-    teacher_fn=model.extract_features,
+    apply_fn_teacher=teacher.apply,
     mask_token_id=tokenizer.mask_token_id,
 )
 
 new_state = trainer.train(state, rngs, train_data, val_data, wandb_configs=configs_dict)
 
-# implement average of topk layers
-# control more on decay using jax condition
 # checkout if masking is working properly

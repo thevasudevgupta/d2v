@@ -1,17 +1,22 @@
-model:
+common:
+  # these are shared for teacher & student
   vocab_size: null  # will be set inside script
   num_attention_heads: 8
   num_hidden_layers: 6
   hidden_size: 512
   intermediate_size: 2048
 
+  # script arguments
+  tokenizer_id: roberta-base
+  is_fp16: false
+
+student:
   # data2vec extra args
   num_head_layers: 2
   approximate_gelu: true
 
-  # model related extra args
-  is_fp16: false
-  tokenizer_id: roberta-base
+teacher:
+  average_top_k_layers: 4
 
 ema:
   ema_start_decay: 0.999

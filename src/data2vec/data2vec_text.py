@@ -11,15 +11,15 @@ from transformers.models.roberta.modeling_flax_roberta import FlaxRobertaModule
 # but why do you think cross entropy loss would be better than mse??
 
 
-class Data2VecTextModelConfig(RobertaConfig):
+class Data2VecTextStudentConfig(RobertaConfig):
     num_head_layers: int = 2
     approximate_gelu: bool = True
 
 
-class Data2VecTextModel(FlaxRobertaModule):
+class Data2VecTextStudent(FlaxRobertaModule):
     """model weights can be directly loaded using `FlaxRobertaModel.from_pretrained(...)`"""
 
-    config: Data2VecTextModelConfig
+    config: Data2VecTextStudentConfig
     dtype: jnp.dtype = jnp.float32  # dtype of the computation
 
     def setup(self):
@@ -33,11 +33,13 @@ class Data2VecTextModel(FlaxRobertaModule):
         self.head_layers = head_layers + [nn.Dense(hidden_size, dtype=self.dtype)]
 
     def __call__(self, input_ids, attention_mask, deterministic: bool = True):
-        hidden_states = (
-            super()
-            .__call__(input_ids, attention_mask, deterministic=deterministic)
-            .last_hidden_state
+        outputs = super().__call__(
+            input_ids,
+            attention_mask,
+            deterministic=deterministic,
         )
+        hidden_states = outputs.last_hidden_state
+
         for layer in self.head_layers:
             hidden_states = layer(hidden_states)
             hidden_states = nn.gelu(
@@ -45,13 +47,32 @@ class Data2VecTextModel(FlaxRobertaModule):
             )
         return hidden_states
 
-    def extract_features(self, input_ids, attention_mask, deterministic: bool = True):
-        hidden_states = (
-            super()
-            .__call__(input_ids, attention_mask, deterministic=deterministic)
-            .last_hidden_state
-        )
-        return hidden_states
+
+class Data2VecTextTeacherConfig(RobertaConfig):
+    average_top_k_layers: int = 4
+
+
+class Data2VecTextTeacher(FlaxRobertaModule):
+    """model weights can be directly loaded using `FlaxRobertaModel.from_pretrained(...)`"""
+
+    config: Data2VecTextTeacherConfig
+    dtype: jnp.dtype = jnp.float32  # dtype of the computation
+
+    def setup(self):
+        super().setup()
+        self.layer_norm_target_layer = nn.LayerNorm(dtype=jnp.float32)
+
+    def __call__(self, input_ids, attention_mask, deterministic: bool = True):
+        outputs = super().__call__(input_ids, attention_mask, deterministic=deterministic, output_hidden_states=True)
+
+        outputs = outputs.hidden_states[-self.config.average_top_k_layers:]
+        outputs = (self.layer_norm_target_layer(output) for output in outputs)
+
+        # TODO: if sum operation efficient here?
+        outputs = sum(outputs) / self.config.average_top_k_layers
+        # TODO: do we need to give float inputs or setting computation dtype is enough??
+
+        return outputs
 
 
 # TODO: how do we apply filter
