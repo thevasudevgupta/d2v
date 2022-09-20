@@ -81,10 +81,9 @@ def training_step(
 
     grads = jax.lax.pmean(grads, axis_name="batch")
 
-    # TODO: why do we need to call following freeze explicitly??
-    teacher_params = state.ema_step(
-        flax.core.freeze(state.teacher_params), flax.core.freeze(state.params)
-    )
+    decay = state.get_decay()
+    teacher_params =  jax.lax.cond(decay < 1, lambda: state.ema_step(decay), lambda: state.teacher_params)
+
     new_state = state.apply_gradients(grads=grads, teacher_params=teacher_params)
 
     return TrainingStepOutput(
@@ -203,6 +202,7 @@ class TrainState(train_state.TrainState):
     teacher_params: flax.core.FrozenDict[str, Any]
     ema_start_decay: float
     ema_end_decay: float
+    ema_anneal_end_step: float
     total_steps: int
 
     mask_token_id: int
@@ -212,14 +212,30 @@ class TrainState(train_state.TrainState):
     loss_fn: Callable = flax.struct.field(pytree_node=False)
     lr_scheduler: Callable = flax.struct.field(pytree_node=False)
 
-    def ema_step(self, teacher_params, student_params):
-        # TODO: try to understand how jit will handle floats & ints under the hood
-        decay = self.get_decay()
+    def ema_step(self, decay):
+        # TODO: try to understand how jit will handle floats & ints under the hood        
         return ema_step(
-            teacher_params, student_params, decay=decay, teacher_dtype=jnp.float32
+            teacher_params=self.teacher_params,
+            student_params=self.params,
+            decay=decay, 
+            teacher_dtype=jnp.float32,
         )
 
     def get_decay(self):
+        return jax.lax.cond(
+            self.ema_start_decay == self.ema_end_decay,
+            lambda: self.ema_start_decay,
+            self._get_decay,
+        )
+
+    def _get_decay(self):
+        return jax.lax.cond(
+            self.step >= self.ema_anneal_end_step,
+            lambda: self.ema_end_decay,
+            self.get_annealed_rate,
+        )
+
+    def get_annealed_rate(self):
         r = self.ema_end_decay - self.ema_start_decay
         pct_remaining = 1 - self.step / self.total_steps
         return self.ema_end_decay - r * pct_remaining
@@ -290,14 +306,14 @@ tx = create_tx(lr_scheduler, configs_dict["optax"]["weight_decay"])
 # as teacher model doesn't have trainable parameters
 state = TrainState.create(
     apply_fn=model.apply,
-    params=flax.core.unfreeze(
-        variables["params"]
-    ),  # TODO: why we need to unfreeze here???
+    # TODO: why we need to unfreeze here???
+    params=flax.core.unfreeze(variables["params"]),
     tx=tx,
     loss_fn=smooth_l1_loss,
     lr_scheduler=lr_scheduler,
     # data2vec specifc arguments
-    teacher_params=variables["params"],
+    teacher_params=flax.core.unfreeze(variables["params"]),
+    ema_anneal_end_step=num_steps,
     ema_start_decay=configs_dict["ema"]["ema_start_decay"],
     ema_end_decay=configs_dict["ema"]["ema_end_decay"],
     total_steps=num_steps,
