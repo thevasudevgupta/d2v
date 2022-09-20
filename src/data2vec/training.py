@@ -31,6 +31,9 @@ class TrainingStepOutput:
     loss: jnp.DeviceArray
     lr: Optional[jnp.DeviceArray] = None
 
+    # TODO: make logging flexible
+    decay: Optional[jnp.DeviceArray] = None
+
 
 @struct.dataclass
 class ValidationStepOutput:
@@ -139,6 +142,9 @@ class Trainer:
                     }
                     if outputs.lr is not None:
                         logs["lr"] = jax_utils.unreplicate(outputs.lr).item()
+
+                    if outputs.decay is not None:
+                        logs["decay"] = jax_utils.unreplicate(outputs.decay).item()
 
                     pbar.set_postfix(**logs)
                     logger.log(logs)

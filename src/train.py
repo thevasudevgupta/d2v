@@ -4,17 +4,19 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Tuple
 
 import flax
-from flax.traverse_util import flatten_dict, unflatten_dict
 import jax
 import jax.numpy as jnp
 import numpy as np
 from datasets import load_dataset
 from flax.training import train_state
+from flax.traverse_util import flatten_dict, unflatten_dict
 from transformers import AutoTokenizer
 
 from data2vec.constants import HF_TOKEN, IGNORE_INDEX
-from data2vec.data2vec_text import (Data2VecTextStudent, Data2VecTextStudentConfig, Data2VecTextTeacher, Data2VecTextTeacherConfig,
-                                    ema_step)
+from data2vec.data2vec_text import (Data2VecTextStudent,
+                                    Data2VecTextStudentConfig,
+                                    Data2VecTextTeacher,
+                                    Data2VecTextTeacherConfig, ema_step)
 from data2vec.training import (BaseConfig, Trainer, TrainerConfig,
                                TrainingStepOutput, ValidationStepOutput)
 from data2vec.utils import (create_tx, custom_save_fn,
@@ -83,7 +85,9 @@ def training_step(
     grads = jax.lax.pmean(grads, axis_name="batch")
 
     decay = state.get_decay()
-    teacher_params =  jax.lax.cond(decay < 1, lambda: state.ema_step(decay), lambda: state.teacher_params)
+    teacher_params = jax.lax.cond(
+        decay < 1, lambda: state.ema_step(decay), lambda: state.teacher_params
+    )
 
     new_state = state.apply_gradients(grads=grads, teacher_params=teacher_params)
 
@@ -92,6 +96,7 @@ def training_step(
         dropout_rng=new_drp_rng,
         loss=jax.lax.pmean(loss, axis_name="batch"),
         lr=state.lr_scheduler(state.step),
+        decay=decay,
     )
 
 
@@ -214,11 +219,11 @@ class TrainState(train_state.TrainState):
     lr_scheduler: Callable = flax.struct.field(pytree_node=False)
 
     def ema_step(self, decay):
-        # TODO: try to understand how jit will handle floats & ints under the hood        
+        # TODO: try to understand how jit will handle floats & ints under the hood
         return ema_step(
             teacher_params=self.teacher_params,
             student_params=self.params,
-            decay=decay, 
+            decay=decay,
             teacher_dtype=jnp.float32,
         )
 
@@ -240,6 +245,7 @@ class TrainState(train_state.TrainState):
         r = self.ema_end_decay - self.ema_start_decay
         pct_remaining = 1 - self.step / self.total_steps
         return self.ema_end_decay - r * pct_remaining
+
 
 configs_dict = read_yaml("config.yaml")
 rngs = jax.random.PRNGKey(0)
@@ -270,11 +276,13 @@ input_ids, attn_mask = jnp.ones((2, 3), dtype="i4"), jnp.ones((2, 3), dtype="i4"
 student_params = student.init(student_rngs, input_ids, attn_mask)["params"]
 
 # TODO: there is a possibility of efficient way here
-# teacher may have some extra layer compared to teacher 
+# teacher may have some extra layer compared to teacher
 # and hence we would have to init teacher separately
 teacher_params = teacher.init(teacher_rngs, input_ids, attn_mask)["params"]
 # but we want to initialize same parameters for the layers which are common in teacher & student
-teacher_params = unflatten_dict({**flatten_dict(teacher_params), **flatten_dict(student_params)})
+teacher_params = unflatten_dict(
+    {**flatten_dict(teacher_params), **flatten_dict(student_params)}
+)
 
 # TODO: why we need to unfreeze here???
 student_params = flax.core.unfreeze(student_params)

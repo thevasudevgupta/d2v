@@ -1,10 +1,9 @@
-
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from flax.traverse_util import flatten_dict, unflatten_dict
 from transformers.models.roberta.configuration_roberta import RobertaConfig
 from transformers.models.roberta.modeling_flax_roberta import FlaxRobertaModule
-from flax.traverse_util import flatten_dict, unflatten_dict
 
 # TODO: make sure initialization is happening correctly
 # TODO: instead of mse loss, we can still try cross entropy loss (or say dot product)??
@@ -63,9 +62,14 @@ class Data2VecTextTeacher(FlaxRobertaModule):
         self.layer_norm_target_layer = nn.LayerNorm(dtype=jnp.float32)
 
     def __call__(self, input_ids, attention_mask, deterministic: bool = True):
-        outputs = super().__call__(input_ids, attention_mask, deterministic=deterministic, output_hidden_states=True)
+        outputs = super().__call__(
+            input_ids,
+            attention_mask,
+            deterministic=deterministic,
+            output_hidden_states=True,
+        )
 
-        outputs = outputs.hidden_states[-self.config.average_top_k_layers:]
+        outputs = outputs.hidden_states[-self.config.average_top_k_layers :]
         outputs = (self.layer_norm_target_layer(output) for output in outputs)
 
         # TODO: if sum operation efficient here?
